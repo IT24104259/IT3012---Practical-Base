@@ -4,9 +4,271 @@ import random
 
 import tkinter as tk
 
+from collections import deque
+
+import heapq
+
+import itertools
+
+FACINGS = ['Up', 'Down', 'Left', 'Right']  # must match visual_grid_game.py
 
 
-FACINGS = ['Up', 'Down', 'Left', 'Right'] # clockwise order.
+class SearchAgent:
+    """Uninformed search agent: plans a full route to the nearest food using
+    BFS, DFS, or UCS over the (position, facing) state space, then executes
+    the plan one action at a time."""
+
+    def __init__(self, active_algo='BFS'):
+
+        self.plan = []
+
+        self.active_algo = active_algo
+
+        self.believed_pos = [0, 0]
+
+        self.facing_estimate = 'Up'
+
+        self.last_action = None
+
+        self.last_move_blocked = False
+
+    # state-space helpers
+    def _delta(self, facing):
+
+        return {'Up': (0, 1), 'Down': (0, -1), 'Left': (-1, 0), 'Right': (1, 0)}[facing]
+
+    def _update_believed_state(self):
+
+        if self.last_action == 'move_forward' and not self.last_move_blocked:
+
+            dx, dy = self._delta(self.facing_estimate)
+
+            self.believed_pos[0] += dx
+
+            self.believed_pos[1] += dy
+
+        elif self.last_action == 'turn_left':
+
+            idx = FACINGS.index(self.facing_estimate)
+
+            self.facing_estimate = FACINGS[(idx - 1) % 4]
+
+        elif self.last_action == 'turn_right':
+
+            idx = FACINGS.index(self.facing_estimate)
+
+            self.facing_estimate = FACINGS[(idx + 1) % 4]
+
+    def _successors(self, state, grid_size, walls):
+
+        """state = (pos_tuple, facing). Returns list of (next_state, action, cost)."""
+
+        pos, facing = state
+
+        width, height = grid_size
+
+        idx = FACINGS.index(facing)
+
+        results = [
+
+            ((pos, FACINGS[(idx - 1) % 4]), 'turn_left', 1),
+
+            ((pos, FACINGS[(idx + 1) % 4]), 'turn_right', 1),
+        ]
+
+        dx, dy = self._delta(facing)
+
+        nx, ny = pos[0] + dx, pos[1] + dy
+
+        if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in walls:
+
+            results.append((((nx, ny), facing), 'move_forward', 1))
+
+        return results
+
+    def _reconstruct_path(self, came_from, goal_state):
+        
+        actions = []
+
+        state = goal_state
+
+        while came_from[state] is not None:
+
+            prev_state, action = came_from[state]
+
+            actions.append(action)
+
+            state = prev_state
+
+        actions.reverse()
+
+        return actions
+
+    # BFS
+
+    def bfs_search(self, start, goal_pos, grid_size, walls):
+
+        frontier = deque([start])
+
+        came_from = {start: None}
+
+        reached = {start}  # Graph Search: prevents re-expanding known states
+
+        while frontier:
+
+            state = frontier.popleft()
+
+            if state[0] == goal_pos:
+
+                return self._reconstruct_path(came_from, state)
+            
+            for nxt_state, action, _cost in self._successors(state, grid_size, walls):
+
+                if nxt_state not in reached:
+
+                    reached.add(nxt_state)
+
+                    came_from[nxt_state] = (state, action)
+
+                    frontier.append(nxt_state)
+
+        return []
+
+    # DFS
+
+    def dfs_search(self, start, goal_pos, grid_size, walls):
+
+        frontier = [start]
+
+        came_from = {start: None}
+
+        reached = {start}
+
+        while frontier:
+
+            state = frontier.pop()
+
+            if state[0] == goal_pos:
+
+                return self._reconstruct_path(came_from, state)
+            
+            for nxt_state, action, _cost in self._successors(state, grid_size, walls):
+
+                if nxt_state not in reached:
+
+                    reached.add(nxt_state)
+
+                    came_from[nxt_state] = (state, action)
+
+                    frontier.append(nxt_state)
+
+        return []
+
+    # UCS
+
+    def ucs_search(self, start, goal_pos, grid_size, walls):
+
+        counter = itertools.count()  # tie-breaker so heapq never compares states directly
+
+        frontier = [(0, next(counter), start)]
+
+        came_from = {start: None}
+
+        best_cost = {start: 0}
+
+        reached = set()
+
+        while frontier:
+
+            cost, _, state = heapq.heappop(frontier)
+
+            if state in reached:
+
+                continue
+
+            reached.add(state)
+
+            if state[0] == goal_pos:
+
+                return self._reconstruct_path(came_from, state)
+
+            for nxt_state, action, step_cost in self._successors(state, grid_size, walls):
+
+                new_cost = cost + step_cost
+
+                if nxt_state not in best_cost or new_cost < best_cost[nxt_state]:
+
+                    best_cost[nxt_state] = new_cost
+
+                    came_from[nxt_state] = (state, action)
+
+                    heapq.heappush(frontier, (new_cost, next(counter), nxt_state))
+
+        return []
+
+    # plan selection / execution 
+
+    def _closest_food(self, all_food):
+
+        if not all_food:
+
+            return None
+        
+        bx, by = self.believed_pos
+
+        return min(all_food, key=lambda f: abs(f[0] - bx) + abs(f[1] - by))
+
+    def sense_and_act(self, percept: dict) -> str:
+
+        self._update_believed_state()
+
+        if not self.plan:
+
+            grid_size = percept['grid_size']
+
+            walls = set(tuple(w) for w in percept['walls'])
+
+            all_food = [tuple(f) for f in percept['all_food']]
+
+            goal = self._closest_food(all_food)
+
+            if goal is None:
+
+                self.last_action = 'turn_left'
+
+                return self.last_action
+
+            start = (tuple(self.believed_pos), self.facing_estimate)
+
+            if self.active_algo == 'BFS':
+
+                self.plan = self.bfs_search(start, goal, grid_size, walls)
+
+            elif self.active_algo == 'DFS':
+
+                self.plan = self.dfs_search(start, goal, grid_size, walls)
+
+            elif self.active_algo == 'UCS':
+
+                self.plan = self.ucs_search(start, goal, grid_size, walls)
+
+            else:
+
+                self.plan = self.bfs_search(start, goal, grid_size, walls)
+
+            if not self.plan:
+
+                self.last_action = 'turn_left'
+
+                return self.last_action
+
+        action = self.plan.pop(0)
+
+        self.last_move_blocked = (action == 'move_forward' and percept['wall_ahead'])
+
+        self.last_action = action
+        
+        return action
 
 
 
@@ -157,6 +419,12 @@ class VisualGridHuntGame:
             'score': self.score,
 
             'remaining_food': len(self.food_positions),
+
+            'grid_size': (self.width, self.height),
+
+            'walls': list(self.walls),
+
+            'all_food': list(self.food_positions),
 
         }
 
@@ -376,6 +644,10 @@ class GridGameGUI:
 
             self.agent = ModelBasedAgent()
 
+        elif agent_type == 'search':
+
+            self.agent = SearchAgent(active_algo='BFS')
+
         else:
 
             self.agent = SimpleReflexAgent()
@@ -568,6 +840,6 @@ if __name__ == "__main__":
 
     # Try a larger grid size like 12x12 with 15 food and 3 opponents!
 
-    app = GridGameGUI(root, width=12, height=12, num_food=15, num_opponents=0, agent_type='simple')
+    app = GridGameGUI(root, width=12, height=12, num_food=15, num_opponents=0, agent_type='search')
 
     root.mainloop()
