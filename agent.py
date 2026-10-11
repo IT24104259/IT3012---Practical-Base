@@ -3,7 +3,9 @@ import random
 from collections import deque
 import heapq
 import itertools
- 
+
+from logic_engine import KnowledgeBase
+
 FACINGS = ['Up', 'Right', 'Down', 'Left']  # clockwise order, shared with visual_grid_game.py
  
  
@@ -36,7 +38,14 @@ class SearchAgent:
         self.facing_estimate = 'Up'
         self.last_action = None
         self.last_move_blocked = False
- 
+
+        # Lab 7: Knowledge Base setup
+        self.kb = KnowledgeBase()
+        # Rule 1: if the target tile is visible and has dust, it's safe to engage.
+        self.kb.tell_rule(['TargetVisible', 'HasDust'], 'SafeToEngage')
+        # Rule 2: if safe to engage but the bloodseeker (backup) is missing, retreat instead.
+        self.kb.tell_rule(['SafeToEngage', 'BloodseekerMissing'], 'Retreat')
+
     #shared helpers
     def _delta(self, facing):
         return {'Up': (0, 1), 'Down': (0, -1), 'Left': (-1, 0), 'Right': (1, 0)}[facing]
@@ -150,39 +159,56 @@ class SearchAgent:
     def euclidean_distance(self, pos, goal):
         return math.sqrt((pos[0] - goal[0]) ** 2 + (pos[1] - goal[1]) ** 2)
  
-    def astar_search(self, start_pos, goal_pos, walls, grid_size, heuristic_type='manhattan'):
+    def astar_search(self, start_pos, goal_pos, walls, grid_size, heuristic_type='manhattan', tile_facts=None):
+        """tile_facts: optional dict mapping a (x, y) tile -> list of fact
+        strings that are TRUE on that tile. Before accepting a candidate
+        neighbor tile, it is run through the Knowledge Base: if the KB
+        derives 'Retreat' for that tile, the tile is reachable (not a wall)
+        but not feasible, so A* skips it instead of expanding it."""
+        if tile_facts is None:
+            tile_facts = {}
+
         heuristic = self.manhattan_distance if heuristic_type == 'manhattan' else self.euclidean_distance
- 
+
         frontier = []
         g0 = 0
         h0 = heuristic(start_pos, goal_pos)
         heapq.heappush(frontier, (g0 + h0, g0, start_pos, [start_pos]))
- 
+
         reached_states = set()
         width, height = grid_size
- 
+
         while frontier:
             f_cost, g_cost, current_pos, path_taken = heapq.heappop(frontier)
- 
+
             if current_pos == goal_pos:
                 return path_taken
- 
+
             if current_pos in reached_states:
                 continue
             reached_states.add(current_pos)
- 
+
             for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                 nx, ny = current_pos[0] + dx, current_pos[1] + dy
                 neighbor = (nx, ny)
- 
+
                 if (0 <= nx < width and 0 <= ny < height
                         and neighbor not in walls
                         and neighbor not in reached_states):
+
+                    # Lab 7: feasibility check via the Knowledge Base
+                    self.kb.clear_facts()
+                    for fact in tile_facts.get(neighbor, []):
+                        self.kb.tell_fact(fact)
+                    self.kb.forward_chain()
+                    if 'Retreat' in self.kb.facts:
+                        continue  # reachable, but not feasible -- skip it
+
                     g_new = g_cost + 1
                     h_new = heuristic(neighbor, goal_pos)
                     f_new = g_new + h_new
                     heapq.heappush(frontier, (f_new, g_new, neighbor, path_taken + [neighbor]))
- 
+
         return []
  
     def _positions_to_actions(self, path, start_facing):
@@ -237,8 +263,14 @@ class SearchAgent:
             elif self.active_algo == 'UCS':
                 self.plan = self.ucs_search(start, goal, grid_size, walls)
             elif self.active_algo == 'AStar':
+                # Lab 7: sample tile_facts fed into A*'s feasibility check
+                # Tile (1, 0) is marked unsafe: the KB derives 'Retreat' for
+                # it, so A* must route around it even though it isn't a wall.
+                tile_facts = {
+                    (1, 0): ['TargetVisible', 'HasDust', 'BloodseekerMissing'],
+                }
                 path = self.astar_search(tuple(self.believed_pos), goal, walls, grid_size,
-                                          heuristic_type='manhattan')
+                                          heuristic_type='manhattan', tile_facts=tile_facts)
                 self.plan = self._positions_to_actions(path, self.facing_estimate)
             else:
                 self.plan = self.bfs_search(start, goal, grid_size, walls)
@@ -251,8 +283,9 @@ class SearchAgent:
         self.last_move_blocked = (action == 'move_forward' and percept['wall_ahead'])
         self.last_action = action
         return action
-    
-    if __name__ == "__main__":
-       sa = SearchAgent()
-       print("Manhattan:", sa.manhattan_distance((0, 0), (3, 4)))
-       print("Euclidean:", sa.euclidean_distance((0, 0), (3, 4)))
+
+
+if __name__ == "__main__":
+    sa = SearchAgent()
+    print("Manhattan:", sa.manhattan_distance((0, 0), (3, 4)))
+    print("Euclidean:", sa.euclidean_distance((0, 0), (3, 4)))
